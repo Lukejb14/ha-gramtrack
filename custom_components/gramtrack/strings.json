@@ -1,0 +1,28 @@
+{
+  "title": "GramTrack",
+  "config": {
+    "step": {
+      "user": {
+        "title": "GramTrack",
+        "description": "Select the entities to show in the GramTrack app's Home screen sensor strip. You can change this any time from Configure.",
+        "data": {
+          "entities": "Entities"
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "GramTrack is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "GramTrack",
+        "description": "Select the entities to show in the GramTrack app's Home screen sensor strip.",
+        "data": {
+          "entities": "Entities"
+        }
+      }
+    }
+  }
+}
