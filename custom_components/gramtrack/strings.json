@@ -6,7 +6,11 @@
         "title": "GramTrack",
         "description": "Select the entities to show in the GramTrack app's Home screen sensor strip. You can change this any time from Configure.",
         "data": {
-          "entities": "Entities"
+          "entities": "Entities",
+          "layout_dashboard": "Home layout dashboard (url path)"
+        },
+        "data_description": {
+          "layout_dashboard": "Optional. The GramTrack app's Home mirrors this dashboard's tile cards, one section per building. Enter the part of the dashboard's address after the first slash; leave empty to turn this off."
         }
       }
     },
@@ -20,7 +24,11 @@
         "title": "GramTrack",
         "description": "Select the entities to show in the GramTrack app's Home screen sensor strip.",
         "data": {
-          "entities": "Entities"
+          "entities": "Entities",
+          "layout_dashboard": "Home layout dashboard (url path)"
+        },
+        "data_description": {
+          "layout_dashboard": "Optional. The GramTrack app's Home mirrors this dashboard's tile cards, one section per building. Enter the part of the dashboard's address after the first slash; leave empty to turn this off."
         }
       }
     }

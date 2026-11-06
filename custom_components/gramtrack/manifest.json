@@ -1,11 +1,12 @@
 {
   "domain": "gramtrack",
   "name": "GramTrack",
+  "after_dependencies": ["lovelace"],
   "codeowners": ["@Lukejb14"],
   "config_flow": true,
   "documentation": "https://github.com/Lukejb14/ha-gramtrack",
   "issue_tracker": "https://github.com/Lukejb14/ha-gramtrack/issues",
   "integration_type": "service",
   "iot_class": "local_polling",
-  "version": "1.0.1"
+  "version": "1.1.0"
 }
