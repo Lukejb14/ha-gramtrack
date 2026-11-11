@@ -13,9 +13,11 @@ import json  # noqa: E402
 from layout import (  # noqa: E402
     DEVICE_ENTITY_CAP,
     IGNORED_CAP,
+    TWIN_CAP,
     attach_devices,
     build_layout,
     layout_changed,
+    twins_among,
 )
 
 
@@ -295,7 +297,8 @@ def test_size_of_twenty_tiles_each_on_a_22_entity_device():
         entities = [ent(f"{domain}.{base}{suffix}", "config" if domain == "switch" else None)
                     for domain, suffix in _APPLIANCE]
         assert len(entities) == 22
-        devices[f"sensor.{base}_machine_state"] = {"name": f"Washer {i}", "entities": entities}
+        devices[f"sensor.{base}_machine_state"] = {"name": f"Washer {i}", "integration": "acme_cloud",
+                                                   "entities": entities}
         cards.append({"type": "tile", "entity": f"sensor.{base}_machine_state", "name": f"Washer {i}"})
     plain = build_layout(dash([{"title": "House", "cards": cards}]))
     out = attach_devices(plain, devices.get)
@@ -308,5 +311,204 @@ def test_size_of_twenty_tiles_each_on_a_22_entity_device():
 
     added = size(out) - size(plain) - sum(len(e["entity"]) for e in siblings)
     configs = sum(1 for e in siblings if "category" in e)
-    assert added <= 14 * len(siblings) + 20 * configs + 60 * 20  # + ~60 a tile for "device"/"name"
+    # + ~60 a tile for "device"/"name", + ~30 for "integration" (since 1.3.0)
+    assert added <= 14 * len(siblings) + 20 * configs + 90 * 20
     assert size(out) < 21 * 1024
+
+
+# --- Twins: the same appliance through another integration (since 1.3.0) ---
+
+
+def dev(id_, model, integration, name=None, entities=()):
+    """A registry device as the coordinator summarises it."""
+    return {"id": id_, "name": name or id_, "model": model, "integration": integration,
+            "entities": list(entities)}
+
+
+RANGE_LOCAL = dev("dev-range-local", "RX-100", "acme_local", "Range")
+RANGE_CLOUD = dev("dev-range-cloud", "RX-100", "acme_cloud", "My range")
+REGISTRY = [
+    dev("dev-lamp", "L1", "lights_co"),
+    RANGE_LOCAL,
+    dev("dev-plug", "", "plugs_co"),
+    RANGE_CLOUD,
+    dev("dev-other", "RX-200", "acme_cloud"),
+]
+
+
+def test_twins_found_by_model():
+    assert twins_among(RANGE_LOCAL, REGISTRY) == [RANGE_CLOUD]
+    assert twins_among(RANGE_CLOUD, REGISTRY) == [RANGE_LOCAL]
+
+
+def test_model_is_matched_after_trimming():
+    padded = dev("dev-range-padded", " RX-100 ", "acme_bridge")
+    assert twins_among(RANGE_LOCAL, [*REGISTRY, padded]) == [RANGE_CLOUD, padded]
+
+
+def test_no_twin_when_the_model_is_empty_or_unique():
+    for model in ("", "   ", None):
+        plug = dev("dev-x", model, "plugs_co")
+        assert twins_among(plug, [*REGISTRY, plug, dev("dev-y", model, "other_co")]) == []
+    assert twins_among(REGISTRY[0], REGISTRY) == []  # L1: the only one
+    assert twins_among(REGISTRY[4], REGISTRY) == []  # RX-200: the only one
+
+
+def test_own_device_is_never_its_own_twin():
+    # In the registry by id, as the coordinator passes it (a different dict).
+    assert RANGE_LOCAL not in twins_among(dict(RANGE_LOCAL), REGISTRY)
+    assert twins_among(dict(RANGE_LOCAL), [RANGE_LOCAL]) == []
+    # The very same dict, even without an id.
+    no_id = {"model": "RX-100", "integration": "acme_local"}
+    assert twins_among(no_id, [no_id]) == []
+
+
+def test_two_units_of_one_model_under_one_integration_have_no_twins():
+    """A pair of door sensors is two doors, not one door seen twice."""
+    front = dev("dev-door-1", "DS-1", "radio_co")
+    back = dev("dev-door-2", "DS-1", "radio_co")
+    bridge = dev("dev-door-bridge", "DS-1", "bridge_co")
+    registry = [front, back, bridge]
+    assert twins_among(front, registry) == []
+    assert twins_among(back, registry) == []
+    assert twins_among(bridge, registry) == []  # two candidates there: which one?
+
+
+def test_an_integration_with_several_of_the_model_is_skipped():
+    """A network integration listing many identical cameras can't say which is ours."""
+    cam = dev("dev-cam", "CAM-3", "cams_co")
+    seen_a = dev("dev-net-a", "CAM-3", "network_co")
+    seen_b = dev("dev-net-b", "CAM-3", "network_co")
+    cloud = dev("dev-cam-cloud", "CAM-3", "cams_cloud")
+    assert twins_among(cam, [seen_a, cam, seen_b, cloud]) == [cloud]
+
+
+def test_devices_without_an_integration_are_never_twins():
+    orphan = dev("dev-orphan", "RX-100", "")
+    assert twins_among(RANGE_LOCAL, [*REGISTRY, orphan]) == [RANGE_CLOUD]
+    assert twins_among(orphan, REGISTRY) == []
+
+
+def test_twins_keep_the_registry_order():
+    first = dev("dev-a", "M", "zeta_co")
+    second = dev("dev-b", "M", "alpha_co")
+    me = dev("dev-me", "M", "mid_co")
+    assert twins_among(me, [first, me, second]) == [first, second]
+
+
+# attach_devices with twins
+
+STOVE_LOCAL = {**RANGE_LOCAL, "entities": [
+    ent("sensor.range_state"),
+    ent("binary_sensor.range_burner_on"),
+    ent("sensor.range_cook_mode", "diagnostic"),
+    ent("select.range_light", "config"),
+]}
+STOVE_CLOUD = {**RANGE_CLOUD, "entities": [
+    ent("sensor.my_range_rssi", "diagnostic"),
+    ent("sensor.my_range_mode"),
+    ent("switch.my_range_lock", "config"),
+    ent("switch.my_range_hidden", hidden=True),
+    ent("switch.my_range_off", disabled=True),
+    ent("sensor.my_range_new", "something_new"),
+]}
+
+
+def stove_of(*twins):
+    return {"sensor.range_state": {**STOVE_LOCAL, "twins": list(twins)}}.get
+
+
+def test_device_names_its_integration():
+    tile = tiles_of(attach_devices(house("sensor.range_state"), stove_of()))[0]
+    assert tile["device"]["integration"] == "acme_local"
+    assert list(tile["device"]) == ["name", "integration", "entities"]  # no twins, no key
+
+
+def test_unknown_integration_gives_no_key():
+    device = {"name": "Gadget", "integration": "", "entities": [ent("sensor.g"), ent("sensor.g_x")]}
+    tile = tiles_of(attach_devices(house("sensor.g"), {"sensor.g": device}.get))[0]
+    assert tile["device"] == {"name": "Gadget", "entities": [{"entity": "sensor.g_x"}]}
+
+
+def test_twin_is_filtered_like_the_device():
+    tile = tiles_of(attach_devices(house("sensor.range_state"), stove_of(STOVE_CLOUD)))[0]
+    assert tile["device"] == {
+        "name": "Range",
+        "integration": "acme_local",
+        "entities": [{"entity": "binary_sensor.range_burner_on"},
+                     {"entity": "select.range_light", "category": "config"}],
+        "twins": [{
+            "name": "My range",
+            "integration": "acme_cloud",
+            "entities": [{"entity": "sensor.my_range_mode"},
+                         {"entity": "switch.my_range_lock", "category": "config"}],
+        }],
+    }
+
+
+def test_twin_cap_and_report():
+    many = {**RANGE_CLOUD, "name": "Big twin",
+            "entities": [ent(f"sensor.big_{i:02d}") for i in range(DEVICE_ENTITY_CAP + 3)]}
+    heard = []
+    out = attach_devices(house("sensor.range_state"), stove_of(many),
+                         lambda name, count: heard.append((name, count)))
+    twin = tiles_of(out)[0]["device"]["twins"][0]
+    assert twin["entities"] == [{"entity": f"sensor.big_{i:02d}"} for i in range(DEVICE_ENTITY_CAP)]
+    assert heard == [("Big twin", DEVICE_ENTITY_CAP + 3)]
+
+
+def test_at_most_three_twins_and_empty_ones_are_dropped():
+    empty = {**RANGE_CLOUD, "name": "Only diagnostics", "entities": [ent("sensor.d", "diagnostic")]}
+    twins = [empty, "junk"] + [
+        {**RANGE_CLOUD, "name": f"Twin {i}", "integration": f"link_{i}",
+         "entities": [ent(f"sensor.twin_{i}")]}
+        for i in range(TWIN_CAP + 2)
+    ]
+    device = tiles_of(attach_devices(house("sensor.range_state"), stove_of(*twins)))[0]["device"]
+    assert [t["name"] for t in device["twins"]] == [f"Twin {i}" for i in range(TWIN_CAP)]
+
+
+def test_no_twins_no_key():
+    for twins in ([], [{**RANGE_CLOUD, "entities": [ent("sensor.x", hidden=True)]}]):
+        device = tiles_of(attach_devices(house("sensor.range_state"), stove_of(*twins)))[0]["device"]
+        assert "twins" not in device
+    odd = {"sensor.range_state": {**STOVE_LOCAL, "twins": "nope"}}
+    assert "twins" not in tiles_of(attach_devices(house("sensor.range_state"), odd.get))[0]["device"]
+
+
+def test_a_twin_alone_still_gives_the_tile_its_device():
+    lonely = {**STOVE_LOCAL, "entities": [ent("sensor.range_state")], "twins": [STOVE_CLOUD]}
+    device = tiles_of(attach_devices(house("sensor.range_state"), {"sensor.range_state": lonely}.get))[0]["device"]
+    assert device["entities"] == []
+    assert [t["name"] for t in device["twins"]] == ["My range"]
+
+
+def test_layout_changed_sees_a_twin_change():
+    before = attach_devices(house("sensor.range_state"), stove_of(STOVE_CLOUD))
+    grown = {**STOVE_CLOUD, "entities": STOVE_CLOUD["entities"] + [ent("sensor.my_range_temp")]}
+    assert layout_changed(before, attach_devices(house("sensor.range_state"), stove_of(grown)))
+    assert layout_changed(before, attach_devices(house("sensor.range_state"), stove_of()))
+    assert not layout_changed(before, attach_devices(house("sensor.range_state"), stove_of(STOVE_CLOUD)))
+
+
+def test_size_of_a_twin():
+    """A twin costs its entities as the device's do, plus a small fixed wrapper.
+
+    Measured on a range-like tile (made-up ids): 34 siblings on the device
+    and a 23-entity twin, all shown.
+    """
+    local = {**RANGE_LOCAL, "entities": [ent(f"sensor.range_model_x_part_{i:02d}") for i in range(35)]}
+    cloud = {**RANGE_CLOUD, "entities": [ent(f"switch.my_range_part_{i:02d}") for i in range(23)]}
+    tile_entity = local["entities"][0]["entity"]
+    with_twin = attach_devices(house(tile_entity), {tile_entity: {**local, "twins": [cloud]}}.get)
+    without = attach_devices(house(tile_entity), {tile_entity: local}.get)
+
+    def size(layout):
+        return len(json.dumps(layout["buildings"], separators=(",", ":")))
+
+    twin = tiles_of(with_twin)[0]["device"]["twins"][0]
+    assert len(twin["entities"]) == 23
+    ids = sum(len(e["entity"]) for e in twin["entities"])
+    wrapper = len(',"twins":[{"name":"","integration":"","entities":[]}]')
+    assert size(with_twin) - size(without) == ids + 14 * 23 - 1 + wrapper + len("My range") + len("acme_cloud")
+    assert size(with_twin) < 4 * 1024

@@ -83,10 +83,30 @@ tiles, in that order, in those buildings, on its next refresh.
     diagnostic entity.
   - A tile with no device, or whose device has nothing else to show, has
     no `device` key. Apps that predate it ignore the key.
+  - `integration` (since 1.3.0): the domain of the device's config entry,
+    e.g. `"integration": "acme_cloud"`; left out when it can't be found.
+- **Twins** (since 1.3.0): some appliances appear twice in Home Assistant,
+  once per integration (a cloud one and a local one, kept side by side so
+  each checks the other). The tile's `device` then carries the other
+  device as `twins`:
+  `"twins": [{"name": "My range", "integration": "acme_cloud", "entities": [...]}]`.
+  - A twin has the same model as the tile's device, under a different
+    integration. It must be the only device of that model in its
+    integration, and the tile's device the only one in its own: two door
+    sensors of one model are two doors, and a camera model that a network
+    integration lists several times can't be matched to one camera, so
+    those give no twins rather than a guess.
+  - Each twin's `entities` are filtered and capped like the device's (no
+    hidden, disabled or diagnostic ones, `category` only on configuration
+    ones, at most 40). A twin with nothing to show is left out; at most 3
+    twins are kept, in the device registry's order.
+  - No twins, no `twins` key. A device with nothing of its own to show but
+    a twin still gives the tile a `device`, with `entities: []`. Apps that
+    predate 1.3.0 ignore `integration` and `twins`.
 - **Refresh:** on every save of that dashboard, every 5 minutes as a
   backstop, at startup, and when the entity or device registry changes
   (at most once every 10 seconds), so an entity added to, hidden on or
-  removed from a device reaches the app.
+  removed from a device (or a twin) reaches the app.
 - **Never empty:** if a read fails (or finds no titled sections), the
   sensor keeps the last good layout and sets `stale: true`; the failure is
   logged once, not on every retry. Only a dashboard that doesn't exist
@@ -103,6 +123,11 @@ devices (tens of KB) never meets the recorder's 16 KB attribute limit.
 
 ## Changelog
 
+- **1.3.0**: a tile's `device` names its `integration` (the config entry's
+  domain) and carries `twins`: the same appliance through another
+  integration (same model, one device of it on each side), each with its
+  name, integration and entities, filtered and capped like the device's,
+  at most 3. Older app builds ignore the new keys.
 - **1.2.0**: each tile of `sensor.gramtrack_home_layout` carries its
   device's other entities as `device` (name, and entities with
   `category: "config"` on configuration ones), leaving out the tile's own

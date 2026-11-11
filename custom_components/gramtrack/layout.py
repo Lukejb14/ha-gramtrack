@@ -12,7 +12,9 @@ Contract with the app (docs/HOME_DASHBOARD_LAYOUT.md in the GramTrack repo):
   any other card type, except ``heading`` cards, which carry nothing.
 - ``name`` is only present when the card sets one.
 - ``device`` (since 1.2.0) is only present when the tile's entity sits on a
-  device that has other entities worth showing (``attach_devices``).
+  device that has other entities worth showing (``attach_devices``). Since
+  1.3.0 it names its ``integration`` and may carry ``twins``: the same
+  appliance seen through another integration (``twins_among``).
 
 ``next_state`` is the coordinator's decision step (what to publish after a
 read) and ``sensor_view`` turns its result into the sensor's state and
@@ -21,11 +23,12 @@ attributes, so the never-publish-empty rule is tested here too.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 IGNORED_CAP = 20
 DEVICE_ENTITY_CAP = 40
+TWIN_CAP = 3
 _QUIET_CARD_TYPES = {"heading"}
 # Entity categories a device's list keeps. ``diagnostic`` (and anything Home
 # Assistant might add later) is left out; ``config`` is kept and marked.
@@ -119,15 +122,51 @@ def layout_changed(old: dict[str, Any] | None, new: dict[str, Any]) -> bool:
     return (old or {}).get("buildings") != new.get("buildings")
 
 
-def _device_view(
-    entity: str, device: Any, on_cap: OnCap | None
-) -> dict[str, Any] | None:
-    """A tile's ``device`` value, or None when its device has nothing else to show."""
-    if not isinstance(device, dict):
-        return None
-    rows = device.get("entities")
+def _text(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def twins_among(device: dict[str, Any], devices: Iterable[Any]) -> list[dict[str, Any]]:
+    """The devices that are ``device``'s appliance seen through another integration.
+
+    ``device`` and each of ``devices`` are ``{"id": str, "model": str | None,
+    "integration": str, ...}``; ``devices`` is the whole registry, in its
+    order, and may include ``device`` itself (matched by ``id``).
+
+    A twin has the same non-empty ``model`` under another integration, and
+    is the only device of that model there, while ``device`` is the only
+    one of its model in its own integration. A model alone doesn't make a
+    twin: two door sensors of one model, or a row of identical cameras that
+    a network integration also lists, can't be told apart, so they give no
+    twins rather than a guess. Devices with no integration are never twins.
+    Registry order is kept, uncapped (``attach_devices`` keeps the first
+    TWIN_CAP that have something to show).
+    """
+    model = _text(device.get("model"))
+    integration = _text(device.get("integration"))
+    if not model or not integration:
+        return []
+    own_id = device.get("id")
+    by_integration: dict[str, list[dict[str, Any]]] = {}
+    for other in devices:
+        if not isinstance(other, dict) or other is device or _text(other.get("model")) != model:
+            continue
+        if own_id is not None and other.get("id") == own_id:
+            continue
+        other_integration = _text(other.get("integration"))
+        if other_integration:
+            by_integration.setdefault(other_integration, []).append(other)
+    if integration in by_integration:
+        return []  # another unit of this model under the same integration
+    return [found[0] for found in by_integration.values() if len(found) == 1]
+
+
+def _entities_view(
+    rows: Any, entity: str, name: str, on_cap: OnCap | None
+) -> list[dict[str, str]]:
+    """A device's entities as a tile carries them: filtered, in order, capped."""
     if not isinstance(rows, list):
-        return None
+        return []
     shown: list[dict[str, str]] = []
     seen = {entity}
     for row in rows:
@@ -141,14 +180,46 @@ def _device_view(
             continue
         seen.add(sibling)
         shown.append({"entity": sibling, "category": "config"} if category else {"entity": sibling})
-    if not shown:
-        return None
-    name = str(device.get("name") or "").strip()
     if len(shown) > DEVICE_ENTITY_CAP:
         if on_cap is not None:
             on_cap(name, len(shown))
         shown = shown[:DEVICE_ENTITY_CAP]
-    return {"name": name, "entities": shown}
+    return shown
+
+
+def _described(name: str, integration: Any, entities: list[dict[str, str]]) -> dict[str, Any]:
+    view: dict[str, Any] = {"name": name}
+    if _text(integration):
+        view["integration"] = _text(integration)
+    view["entities"] = entities
+    return view
+
+
+def _device_view(
+    entity: str, device: Any, on_cap: OnCap | None
+) -> dict[str, Any] | None:
+    """A tile's ``device`` value, or None when its device has nothing else to show."""
+    if not isinstance(device, dict):
+        return None
+    name = _text(device.get("name"))
+    shown = _entities_view(device.get("entities"), entity, name, on_cap)
+    twins: list[dict[str, Any]] = []
+    candidates = device.get("twins")
+    for twin in candidates if isinstance(candidates, list) else []:
+        if len(twins) == TWIN_CAP:
+            break
+        if not isinstance(twin, dict):
+            continue
+        twin_name = _text(twin.get("name"))
+        rows = _entities_view(twin.get("entities"), entity, twin_name, on_cap)
+        if rows:
+            twins.append(_described(twin_name, twin.get("integration"), rows))
+    if not shown and not twins:
+        return None
+    view = _described(name, device.get("integration"), shown)
+    if twins:
+        view["twins"] = twins
+    return view
 
 
 def attach_devices(
@@ -157,18 +228,27 @@ def attach_devices(
     """Give each tile the other entities of its device, as ``tile["device"]``.
 
     ``device_of(entity_id)`` returns the entity's device, or None when it has
-    none: ``{"name": str, "entities": [{"entity": str, "category":
-    "config" | "diagnostic" | None, "hidden": bool, "disabled": bool}, ...]}``,
-    the entities in the registry's order.
+    none: ``{"name": str, "integration": str, "entities": [{"entity": str,
+    "category": "config" | "diagnostic" | None, "hidden": bool, "disabled":
+    bool}, ...], "twins": [<the same shape, without twins>, ...]}``, the
+    entities in the registry's order. ``twins`` (optional) are the devices
+    ``twins_among`` found; ``integration`` is the config entry's domain.
 
-    A tile gains ``{"name": ..., "entities": [{"entity": ...}, ...]}`` when its
-    device has at least one entity left after leaving out the tile's own
-    entity and every hidden, disabled or ``diagnostic`` one. ``category`` is
-    present (as ``"config"``) only on configuration entities, the way a
-    card's ``name`` is only present when set. Order is kept; at most
+    A tile gains ``{"name": ..., "integration": ..., "entities":
+    [{"entity": ...}, ...]}`` when its device has at least one entity left
+    after leaving out the tile's own entity and every hidden, disabled or
+    ``diagnostic`` one. ``category`` is present (as ``"config"``) only on
+    configuration entities, the way a card's ``name`` is only present when
+    set; ``integration`` only when known. Order is kept; at most
     DEVICE_ENTITY_CAP entities per device, and ``on_cap(name, count)`` hears
-    about any device that had more. With no ``device_of`` the layout is
-    returned as it came.
+    about any device that had more.
+
+    ``twins`` (since 1.3.0): each twin filtered and capped the same way, as
+    ``{"name", "integration", "entities"}``; a twin left with nothing is
+    dropped, and at most TWIN_CAP are kept. No twins, no key. A device with
+    nothing of its own to show but a twin still gives the tile a ``device``
+    (with ``entities: []``). With no ``device_of`` the layout is returned
+    as it came.
     """
     if device_of is None:
         return layout
