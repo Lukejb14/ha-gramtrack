@@ -150,3 +150,51 @@ def test_clean_url_path():
     assert clean_url_path(" my-dash ") == "my-dash"
     assert clean_url_path("/my-dash/0") == "my-dash"
     assert clean_url_path("my-dash/") == "my-dash"
+
+
+# --- Devices through the decision step (since 1.2.0) ----------------------
+
+
+WASHER_TILE = {"title": "House", "cards": [{"type": "tile", "entity": "sensor.washer_state"}]}
+
+
+def washer(*extra):
+    rows = ["sensor.washer_state", "button.washer_start", *extra]
+    device = {"name": "Washer", "entities": [
+        {"entity": e, "category": None, "hidden": False, "disabled": False} for e in rows
+    ]}
+    return {"sensor.washer_state": device}.get
+
+
+def test_good_read_carries_the_device():
+    state, problem = next_state(None, dash(WASHER_TILE), T1, washer())
+    assert problem is None
+    assert state["buildings"] == [{"id": "house", "tiles": [{
+        "entity": "sensor.washer_state",
+        "device": {"name": "Washer", "entities": [{"entity": "button.washer_start"}]},
+    }]}]
+    assert sensor_view(state, "d")[1]["buildings"] == state["buildings"]
+
+
+def test_new_sibling_bumps_the_version():
+    first, _ = next_state(None, dash(WASHER_TILE), T1, washer())
+    same, _ = next_state(first, dash(WASHER_TILE), T2, washer())
+    assert (same["version"], same["last_changed"]) == (1, T1)
+    grown, _ = next_state(same, dash(WASHER_TILE), T3, washer("sensor.washer_water"))
+    assert (grown["version"], grown["last_changed"]) == (2, T3)
+    assert [e["entity"] for e in grown["buildings"][0]["tiles"][0]["device"]["entities"]] == [
+        "button.washer_start", "sensor.washer_water"]
+
+
+def test_failed_read_keeps_the_last_devices():
+    first, _ = next_state(None, dash(WASHER_TILE), T1, washer())
+    state, problem = next_state(first, RuntimeError("boom"), T2, washer("sensor.washer_water"))
+    assert problem == "RuntimeError: boom"
+    assert state == {**first, "stale": True}
+
+
+def test_cap_is_heard_through_the_decision_step():
+    many = [f"sensor.washer_{i:02d}" for i in range(45)]
+    heard = []
+    next_state(None, dash(WASHER_TILE), T1, washer(*many), lambda n, c: heard.append((n, c)))
+    assert heard == [("Washer", 46)]  # the start button plus the 45

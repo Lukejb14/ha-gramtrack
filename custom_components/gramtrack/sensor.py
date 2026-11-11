@@ -83,7 +83,9 @@ class GramTrackHomeLayoutSensor(SensorEntity):
 
     _attr_should_poll = False
     _attr_icon = "mdi:view-dashboard-edit"
-    # The layout can run to a few KB; keeping its history is of no use.
+    # The layout, with each tile's device, can run to tens of KB; keeping its
+    # history is of no use, and unrecorded it never meets the recorder's 16 KB
+    # attribute limit.
     _unrecorded_attributes = frozenset({"buildings", "ignored"})
 
     def __init__(self, entry: ConfigEntry, coordinator: HomeLayoutCoordinator) -> None:

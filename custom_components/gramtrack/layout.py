@@ -11,6 +11,8 @@ Contract with the app (docs/HOME_DASHBOARD_LAYOUT.md in the GramTrack repo):
   ``visibility`` condition is dropped and listed under ``ignored``; so is
   any other card type, except ``heading`` cards, which carry nothing.
 - ``name`` is only present when the card sets one.
+- ``device`` (since 1.2.0) is only present when the tile's entity sits on a
+  device that has other entities worth showing (``attach_devices``).
 
 ``next_state`` is the coordinator's decision step (what to publish after a
 read) and ``sensor_view`` turns its result into the sensor's state and
@@ -19,10 +21,20 @@ attributes, so the never-publish-empty rule is tested here too.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 IGNORED_CAP = 20
+DEVICE_ENTITY_CAP = 40
 _QUIET_CARD_TYPES = {"heading"}
+# Entity categories a device's list keeps. ``diagnostic`` (and anything Home
+# Assistant might add later) is left out; ``config`` is kept and marked.
+_SHOWN_CATEGORIES = {None, "config"}
+
+# ``device_of(entity_id)``: the entity's device, or None. See ``attach_devices``.
+DeviceOf = Callable[[str], "dict[str, Any] | None"]
+# ``on_cap(device_name, count)``: a device had more than DEVICE_ENTITY_CAP to show.
+OnCap = Callable[[str, int], None]
 
 
 def _cards_of(section: dict[str, Any]) -> list[dict[str, Any]]:
@@ -73,7 +85,7 @@ def build_layout(config: dict[str, Any] | None) -> dict[str, Any]:
         if not title:
             continue
         building_id = title.lower()
-        tiles: list[dict[str, str]] = []
+        tiles: list[dict[str, Any]] = []
         for card in cards:
             card_type = str(card.get("type") or "")
             if card_type in _QUIET_CARD_TYPES:
@@ -88,7 +100,7 @@ def build_layout(config: dict[str, Any] | None) -> dict[str, Any]:
                     ignored.append({"section": title, "card": "tile", "entity": entity,
                                     "reason": "visibility"})
                 continue
-            tile: dict[str, str] = {"entity": entity}
+            tile: dict[str, Any] = {"entity": entity}
             name = card.get("name")
             if isinstance(name, str) and name.strip():
                 tile["name"] = name.strip()
@@ -99,8 +111,75 @@ def build_layout(config: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def layout_changed(old: dict[str, Any] | None, new: dict[str, Any]) -> bool:
-    """True when the tiles differ (``ignored`` alone doesn't count)."""
+    """True when the tiles differ (``ignored`` alone doesn't count).
+
+    A tile's ``device`` is part of the tile, so a change in its device's
+    entities counts too.
+    """
     return (old or {}).get("buildings") != new.get("buildings")
+
+
+def _device_view(
+    entity: str, device: Any, on_cap: OnCap | None
+) -> dict[str, Any] | None:
+    """A tile's ``device`` value, or None when its device has nothing else to show."""
+    if not isinstance(device, dict):
+        return None
+    rows = device.get("entities")
+    if not isinstance(rows, list):
+        return None
+    shown: list[dict[str, str]] = []
+    seen = {entity}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        sibling = row.get("entity")
+        if not isinstance(sibling, str) or not sibling or sibling in seen:
+            continue
+        category = row.get("category")
+        if row.get("hidden") or row.get("disabled") or category not in _SHOWN_CATEGORIES:
+            continue
+        seen.add(sibling)
+        shown.append({"entity": sibling, "category": "config"} if category else {"entity": sibling})
+    if not shown:
+        return None
+    name = str(device.get("name") or "").strip()
+    if len(shown) > DEVICE_ENTITY_CAP:
+        if on_cap is not None:
+            on_cap(name, len(shown))
+        shown = shown[:DEVICE_ENTITY_CAP]
+    return {"name": name, "entities": shown}
+
+
+def attach_devices(
+    layout: dict[str, Any], device_of: DeviceOf | None, on_cap: OnCap | None = None
+) -> dict[str, Any]:
+    """Give each tile the other entities of its device, as ``tile["device"]``.
+
+    ``device_of(entity_id)`` returns the entity's device, or None when it has
+    none: ``{"name": str, "entities": [{"entity": str, "category":
+    "config" | "diagnostic" | None, "hidden": bool, "disabled": bool}, ...]}``,
+    the entities in the registry's order.
+
+    A tile gains ``{"name": ..., "entities": [{"entity": ...}, ...]}`` when its
+    device has at least one entity left after leaving out the tile's own
+    entity and every hidden, disabled or ``diagnostic`` one. ``category`` is
+    present (as ``"config"``) only on configuration entities, the way a
+    card's ``name`` is only present when set. Order is kept; at most
+    DEVICE_ENTITY_CAP entities per device, and ``on_cap(name, count)`` hears
+    about any device that had more. With no ``device_of`` the layout is
+    returned as it came.
+    """
+    if device_of is None:
+        return layout
+    buildings = []
+    for building in layout.get("buildings", []):
+        tiles = []
+        for tile in building.get("tiles", []):
+            device = _device_view(tile["entity"], device_of(tile["entity"]), on_cap)
+            tiles.append({**tile, "device": device} if device else tile)
+        buildings.append({**building, "tiles": tiles})
+    return {**layout, "buildings": buildings}
 
 
 class _Missing:
@@ -121,7 +200,9 @@ def clean_url_path(value: Any) -> str:
     return str(value or "").strip().strip("/").split("/")[0].strip()
 
 
-def _problem(result: Any) -> tuple[dict[str, Any] | None, str | None]:
+def _problem(
+    result: Any, device_of: DeviceOf | None, on_cap: OnCap | None
+) -> tuple[dict[str, Any] | None, str | None]:
     """The layout a read result gives, or why it can't be published."""
     if isinstance(result, BaseException):
         text = str(result)
@@ -131,18 +212,24 @@ def _problem(result: Any) -> tuple[dict[str, Any] | None, str | None]:
     layout = build_layout(result)
     if not layout["buildings"]:
         return None, "no titled sections in the first view"
-    return layout, None
+    return attach_devices(layout, device_of, on_cap), None
 
 
 def next_state(
-    previous: dict[str, Any] | None, result: Any, now: str
+    previous: dict[str, Any] | None,
+    result: Any,
+    now: str,
+    device_of: DeviceOf | None = None,
+    on_cap: OnCap | None = None,
 ) -> tuple[dict[str, Any], str | None]:
     """Return the state to publish after a read, and the problem if it failed.
 
     ``result`` is the dashboard config, ``MISSING``, or the exception (or
-    odd value) the read produced. Rules:
+    odd value) the read produced. ``device_of`` and ``on_cap`` go to
+    ``attach_devices``. Rules:
     - A good read replaces the layout; ``version`` bumps and
-      ``last_changed`` becomes ``now`` only when the tiles changed.
+      ``last_changed`` becomes ``now`` only when the tiles (devices
+      included) changed.
     - A failed read, or one with no buildings, never publishes empty: the
       previous state is kept and marked ``stale``.
     - Only a missing dashboard drops the layout.
@@ -152,7 +239,7 @@ def next_state(
     if result is MISSING:
         return {"missing": True, "stale": False, "version": version}, None
 
-    layout, problem = _problem(result)
+    layout, problem = _problem(result, device_of, on_cap)
     if layout is None:
         return {**prev, "stale": True}, problem
 

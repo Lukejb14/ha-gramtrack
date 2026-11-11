@@ -67,11 +67,26 @@ tiles, in that order, in those buildings, on its next refresh.
   - **attributes.last_changed**: same as the state
   - **attributes.stale**: `true` when the latest read failed
   - **attributes.buildings**: `[{"id": "<section title, lowercased>",
-    "tiles": [{"entity": "...", "name": "..."}]}]` (`name` only when the
-    card sets one)
+    "tiles": [{"entity": "...", "name": "...", "device": {...}}]}]`
+    (`name` only when the card sets one; `device` as below)
   - **attributes.ignored**: skipped cards, at most 20
+- **Each tile's device** (since 1.2.0): when the tile's entity belongs to a
+  device that has other entities, the tile carries them, so the app can
+  show the whole appliance behind one tile:
+  `"device": {"name": "Washer", "entities": [{"entity": "select.washer_cycle"},
+  {"entity": "switch.washer_extra_rinse", "category": "config"}]}`.
+  - `name` is the device's name (the one you gave it, else its own).
+  - `entities` are in the entity registry's order, at most 40 (a device
+    with more is logged once). `category` is present only on
+    configuration entities, and is then `"config"`.
+  - Left out: the tile's own entity, and every hidden, disabled or
+    diagnostic entity.
+  - A tile with no device, or whose device has nothing else to show, has
+    no `device` key. Apps that predate it ignore the key.
 - **Refresh:** on every save of that dashboard, every 5 minutes as a
-  backstop, and at startup.
+  backstop, at startup, and when the entity or device registry changes
+  (at most once every 10 seconds), so an entity added to, hidden on or
+  removed from a device reaches the app.
 - **Never empty:** if a read fails (or finds no titled sections), the
   sensor keeps the last good layout and sets `stale: true`; the failure is
   logged once, not on every retry. Only a dashboard that doesn't exist
@@ -82,6 +97,22 @@ The dashboard is read in-process from Home Assistant's Lovelace storage
 (no token, no websocket). That storage is internal to Home Assistant, so
 an upgrade could change it; when that happens the sensor goes stale rather
 than empty.
+
+The layout attributes aren't recorded in history, so a dashboard of many
+devices (tens of KB) never meets the recorder's 16 KB attribute limit.
+
+## Changelog
+
+- **1.2.0**: each tile of `sensor.gramtrack_home_layout` carries its
+  device's other entities as `device` (name, and entities with
+  `category: "config"` on configuration ones), leaving out the tile's own
+  entity and hidden, disabled and diagnostic ones, at most 40 a device.
+  The layout also refreshes when the entity or device registry changes.
+  Older app builds ignore the new key.
+- **1.1.0**: `sensor.gramtrack_home_layout`, the app's Home tiles from a
+  dashboard named in Options.
+- **1.0.0**: `sensor.gramtrack`, the entities picked for the app's sensor
+  strip.
 
 ## License
 
